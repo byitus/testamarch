@@ -3,18 +3,16 @@
    Vanilla JS · no frameworks · modular functions
    ========================================================= */
 
-/* ---------- 0. CLIENT CONFIG ----------
-   With backend, we no longer need secrets in the browser.
-   Only the WhatsApp number stays here (it's public anyway — it's on the contact page).
-*/
-const CONFIG = Object.assign({
+/* ---------- 0. CLIENT CONFIG — EDIT THESE TWO LINES ---------- */
+const CONFIG = {
+  // Get a free key from https://web3forms.com (paste your client's email there)
+  // Until set, leads still get logged + WhatsApp link still works
+  WEB3FORMS_KEY: '98574652-7cb1-4aca-ac40-cd1cbfd5d1e5',
+  // Client's WhatsApp number — country code + number, NO +, spaces, or dashes
   CLIENT_WHATSAPP: '918072027840',
-  // API endpoints — relative paths, work in dev and production
-  API_LEAD: '/api/lead',
-  API_ADMIN_AUTH: '/api/admin-auth',
-  // Admin route — change to something only you know
-  ADMIN_ROUTE: '#admin'
-}, (typeof window !== 'undefined' && window.AM_CONFIG) || {});
+  // Admin panel password (change before deploying)
+  ADMIN_PASSWORD: 'amarchitects@123'
+};
 
 /* ---------- 1. STATE / MOCK BACKEND ---------- */
 
@@ -47,15 +45,7 @@ const Store = {
   saveLead(l) {
     const leads = JSON.parse(localStorage.getItem(this.KEY_LEADS) || '[]');
     leads.push({ ...l, at: new Date().toISOString() });
-    // keep only the most recent 500 leads to prevent unbounded localStorage growth
-    while (leads.length > 500) leads.shift();
-    try {
-      localStorage.setItem(this.KEY_LEADS, JSON.stringify(leads));
-    } catch (err) {
-      // localStorage full — drop oldest 100 and retry
-      leads.splice(0, 100);
-      try { localStorage.setItem(this.KEY_LEADS, JSON.stringify(leads)); } catch {}
-    }
+    localStorage.setItem(this.KEY_LEADS, JSON.stringify(leads));
   },
 };
 
@@ -67,6 +57,8 @@ const MockFirebase = {
     const code = String(Math.floor(100000 + Math.random() * 900000));
     sessionStorage.setItem('am_otp', code);
     sessionStorage.setItem('am_otp_phone', phone);
+    console.log(`%c[Firebase Auth]%c OTP sent to +91 ${phone}: ${code}`,
+      'background:#1c1a16;color:#b08d4f;padding:2px 6px;border-radius:2px;', 'color:#1c1a16;');
     return Promise.resolve({ ok: true, code });
   },
   verifyOTP(input) {
@@ -76,26 +68,32 @@ const MockFirebase = {
 };
 
 const MockEmail = {
-  // Real lead delivery — POSTs to /api/lead. Backend forwards to Web3Forms with the secret key.
+  // Real lead delivery — sends to client's email (Web3Forms) + opens WhatsApp deep link
   async send({ to, subject, body, leadData }) {
-    try {
-      const r = await fetch(CONFIG.API_LEAD, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          subject,
-          ...leadData
-        })
-      });
-      if (!r.ok) {
-        // Even if backend fails, the lead is still saved in localStorage
-        // and the WhatsApp forward is offered as fallback
-        return { ok: false };
+    // 1. Try Web3Forms (real email delivery)
+    if (CONFIG.WEB3FORMS_KEY && CONFIG.WEB3FORMS_KEY !== 'YOUR_WEB3FORMS_ACCESS_KEY_HERE') {
+      try {
+        await fetch('https://api.web3forms.com/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({
+            access_key: CONFIG.WEB3FORMS_KEY,
+            subject: subject,
+            from_name: 'AM Architects Website',
+            message: body,
+            ...leadData
+          })
+        });
+        console.log('%c[Lead Sent]%c via Web3Forms email',
+          'background:#c9985f;color:#0d0a0b;padding:2px 6px;border-radius:2px;', 'color:#c9985f;');
+      } catch (e) {
+        console.warn('Web3Forms send failed (lead saved locally):', e);
       }
-      return { ok: true };
-    } catch (e) {
-      return { ok: false };
+    } else {
+      console.log('%c[Lead Captured]%c (Web3Forms key not set — set CONFIG.WEB3FORMS_KEY)\n%s',
+        'background:#c9985f;color:#0d0a0b;padding:2px 6px;border-radius:2px;', 'color:#877665;', body);
     }
+    return { ok: true };
   },
 
   // Open WhatsApp with pre-filled lead details — for instant forward to client
@@ -110,11 +108,6 @@ const MockEmail = {
 
 const $ = (s, p = document) => p.querySelector(s);
 const $$ = (s, p = document) => Array.from(p.querySelectorAll(s));
-
-// Escape HTML to prevent XSS when injecting user-editable content
-const esc = (str) => String(str == null ? '' : str).replace(/[&<>"']/g, c => ({
-  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-}[c]));
 
 function toast(msg, ms = 3200) {
   const t = $('#toast');
@@ -135,28 +128,17 @@ function runLoader() {
   const loader = $('#loader');
   if (!loader) return;
 
-  // Hard safety timeout — loader ALWAYS closes within 4s no matter what
-  const safetyTimer = setTimeout(() => {
-    if (loader && !loader.classList.contains('is-done')) {
-      loader.classList.add('is-done');
-      setTimeout(() => loader.remove(), 800);
-    }
-  }, 4000);
+  // Animate the progress bar from 0% to 100% over 1.6 seconds (single CSS transition)
+  if (bar) {
+    bar.style.transition = 'width 1.6s linear';
+    requestAnimationFrame(() => { bar.style.width = '100%'; });
+  }
 
-  let p = 0;
-  const tick = () => {
-    p += Math.random() * 14 + 6;
-    if (p >= 100) {
-      if (bar) bar.style.width = '100%';
-      clearTimeout(safetyTimer);
-      setTimeout(() => loader.classList.add('is-done'), 400);
-      setTimeout(() => loader.remove(), 1300);
-      return;
-    }
-    if (bar) bar.style.width = p + '%';
-    setTimeout(tick, 120 + Math.random() * 140);
-  };
-  tick();
+  // Hide the loader after 1.8 seconds — single setTimeout, no chained animation frames
+  setTimeout(() => {
+    loader.classList.add('is-done');
+    setTimeout(() => { if (loader.parentNode) loader.parentNode.removeChild(loader); }, 800);
+  }, 1800);
 }
 
 /* ---------- 5. NAV ---------- */
@@ -743,10 +725,6 @@ function initContactForm() {
   $('#contactForm').addEventListener('submit', async e => {
     e.preventDefault();
     const fd = new FormData(e.target);
-
-    // Honeypot — bots fill this hidden field. Pretend success but drop the lead.
-    if (fd.get('botcheck')) { toast('Thank you. Our team will contact you shortly.'); e.target.reset(); return; }
-
     const lead = {
       type: 'enquiry',
       name: fd.get('name') || '',
@@ -757,10 +735,6 @@ function initContactForm() {
     };
     if (!lead.phone || lead.phone.replace(/\D/g, '').length < 10) {
       toast('Please enter a valid phone number.');
-      return;
-    }
-    if (lead.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lead.email)) {
-      toast('Please enter a valid email or leave it blank.');
       return;
     }
     Store.saveLead(lead);
@@ -801,10 +775,6 @@ function initCareersForm() {
   $('#careerForm').addEventListener('submit', async e => {
     e.preventDefault();
     const fd = new FormData(e.target);
-
-    // Honeypot
-    if (fd.get('botcheck')) { toast('Application received. We\'ll be in touch.'); e.target.reset(); return; }
-
     const app = {
       type: 'application',
       name: fd.get('name'),
@@ -1104,7 +1074,7 @@ function initAdmin() {
 
   // open if URL hash is #admin
   const checkHash = () => {
-    if (location.hash === CONFIG.ADMIN_ROUTE) {
+    if (location.hash === '#admin') {
       panel.classList.add('is-open');
       document.body.style.overflow = 'hidden';
     } else {
@@ -1115,54 +1085,18 @@ function initAdmin() {
   window.addEventListener('hashchange', checkHash);
   checkHash();
 
-  // login — sends password to backend for verification, gets back a 4-hour token
-  let attempts = 0;
-  let lockUntil = 0;
-  const tryLogin = async () => {
-    if (Date.now() < lockUntil) {
-      const wait = Math.ceil((lockUntil - Date.now()) / 1000);
-      toast(`Too many attempts. Try again in ${wait}s.`);
-      return;
-    }
+  // login
+  const tryLogin = () => {
     const v = $('#adminPassword').value;
-    if (!v) return;
-
-    try {
-      const r = await fetch(CONFIG.API_ADMIN_AUTH, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: v })
-      });
-      const data = await r.json().catch(() => ({}));
-
-      if (r.ok && data.token) {
-        attempts = 0;
-        sessionStorage.setItem('am_admin', data.token);
-        panel.classList.add('is-authed');
-        $('#adminPassword').value = '';
-        renderAdmin();
-        return;
-      }
-
-      if (r.status === 429) {
-        lockUntil = Date.now() + 5 * 60_000;
-        toast('Too many failed attempts. Locked for 5 minutes.');
-        return;
-      }
-
-      attempts++;
-      if (attempts >= 5) {
-        lockUntil = Date.now() + 30000;
-        attempts = 0;
-        toast('Too many failed attempts. Locked for 30 seconds.');
-      } else {
-        toast(`Wrong password. (${5 - attempts} attempts left)`);
-      }
-    } catch (e) {
-      toast('Could not reach server. Check your connection.');
+    if (v === CONFIG.ADMIN_PASSWORD) {
+      panel.classList.add('is-authed');
+      sessionStorage.setItem('am_admin', '1');
+      renderAdmin();
+    } else {
+      toast('Wrong password.');
     }
   };
-  if (sessionStorage.getItem('am_admin')) panel.classList.add('is-authed');
+  if (sessionStorage.getItem('am_admin') === '1') panel.classList.add('is-authed');
   $('#adminLoginBtn').addEventListener('click', tryLogin);
   $('#adminPassword').addEventListener('keydown', e => { if (e.key === 'Enter') tryLogin(); });
 
@@ -1208,59 +1142,12 @@ function initAdmin() {
   $('#adminImportFile').addEventListener('change', e => {
     const f = e.target.files[0];
     if (!f) return;
-    if (f.size > 5 * 1024 * 1024) { toast('JSON file too large (max 5MB).'); e.target.value = ''; return; }
-
-    // Only allow http(s) image URLs — prevents javascript: / data: payloads
-    const safeUrl = (u) => {
-      if (typeof u !== 'string') return '';
-      try {
-        const url = new URL(u, location.href);
-        return (url.protocol === 'http:' || url.protocol === 'https:') ? u : '';
-      } catch { return ''; }
-    };
-
     const reader = new FileReader();
     reader.onload = () => {
       try {
         const data = JSON.parse(reader.result);
-        if (data && Array.isArray(data.projects)) {
-          const clean = data.projects
-            .filter(p => p && typeof p === 'object')
-            .map(p => ({
-              id: String(p.id || ('p' + Date.now())),
-              cat: ['residential', 'commercial', 'community'].includes(p.cat) ? p.cat : 'residential',
-              title: String(p.title || '').slice(0, 200),
-              location: String(p.location || '').slice(0, 200),
-              year: String(p.year || '').slice(0, 20),
-              size: ['project--sm', 'project--md', 'project--lg'].includes(p.size) ? p.size : 'project--md',
-              img: safeUrl(p.img),
-              tags: Array.isArray(p.tags) ? p.tags.slice(0, 10).map(t => String(t).slice(0, 50)) : [],
-              desc: String(p.desc || '').slice(0, 500),
-              body: Array.isArray(p.body) ? p.body.slice(0, 20).map(s => String(s).slice(0, 5000)) : [],
-              facts: {
-                area: String(p.facts?.area || '').slice(0, 100),
-                completion: String(p.facts?.completion || '').slice(0, 100),
-                team: String(p.facts?.team || '').slice(0, 200)
-              }
-            }));
-          ContentStore.saveProjects(clean);
-        }
-        if (data && Array.isArray(data.articles)) {
-          const clean = data.articles
-            .filter(a => a && typeof a === 'object')
-            .map(a => ({
-              id: String(a.id || ('a' + Date.now())),
-              category: ['sustainable', 'modern', 'techniques'].includes(a.category) ? a.category : 'modern',
-              categoryLabel: String(a.categoryLabel || '').slice(0, 100),
-              title: String(a.title || '').slice(0, 200),
-              excerpt: String(a.excerpt || '').slice(0, 500),
-              date: String(a.date || '').slice(0, 50),
-              readTime: String(a.readTime || '').slice(0, 30),
-              image: safeUrl(a.image),
-              body: String(a.body || '').slice(0, 20000)
-            }));
-          ContentStore.saveArticles(clean);
-        }
+        if (data.projects) ContentStore.saveProjects(data.projects);
+        if (data.articles) ContentStore.saveArticles(data.articles);
         renderAdmin();
         renderProjects();
         renderArticles();
@@ -1285,18 +1172,18 @@ function initAdmin() {
 }
 
 function renderAdmin() {
-  // projects — every interpolated field escaped to prevent XSS
+  // projects
   const projects = ContentStore.loadProjects();
   $('#adminProjects').innerHTML = projects.map(p => `
     <div class="admin__row">
-      <div class="admin__row-thumb" style="background-image:url('${encodeURI(p.img || '')}')"></div>
+      <div class="admin__row-thumb" style="background-image:url('${p.img}')"></div>
       <div class="admin__row-info">
-        <b>${esc(p.title)}</b>
-        <span>${esc(p.cat)} · ${esc(p.location)} · ${esc(p.year)}</span>
+        <b>${p.title}</b>
+        <span>${p.cat} · ${p.location} · ${p.year}</span>
       </div>
       <div class="admin__row-actions">
-        <button class="admin__action" data-edit-p="${esc(p.id)}">Edit</button>
-        <button class="admin__action admin__action--del" data-del-p="${esc(p.id)}">Delete</button>
+        <button class="admin__action" data-edit-p="${p.id}">Edit</button>
+        <button class="admin__action admin__action--del" data-del-p="${p.id}">Delete</button>
       </div>
     </div>
   `).join('') || '<p style="color:var(--muted)">No projects yet.</p>';
@@ -1311,18 +1198,18 @@ function renderAdmin() {
     toast('Project deleted.');
   }));
 
-  // articles — same escape treatment
+  // articles
   const articles = ContentStore.loadArticles() || ARTICLES;
   $('#adminArticles').innerHTML = articles.map(a => `
     <div class="admin__row">
-      <div class="admin__row-thumb" style="background-image:url('${encodeURI(a.image || '')}')"></div>
+      <div class="admin__row-thumb" style="background-image:url('${a.image}')"></div>
       <div class="admin__row-info">
-        <b>${esc(a.title)}</b>
-        <span>${esc(a.categoryLabel || a.category)} · ${esc(a.date)}</span>
+        <b>${a.title}</b>
+        <span>${a.categoryLabel || a.category} · ${a.date}</span>
       </div>
       <div class="admin__row-actions">
-        <button class="admin__action" data-edit-a="${esc(a.id)}">Edit</button>
-        <button class="admin__action admin__action--del" data-del-a="${esc(a.id)}">Delete</button>
+        <button class="admin__action" data-edit-a="${a.id}">Edit</button>
+        <button class="admin__action admin__action--del" data-del-a="${a.id}">Delete</button>
       </div>
     </div>
   `).join('') || '<p style="color:var(--muted)">No articles yet.</p>';
@@ -1337,26 +1224,25 @@ function renderAdmin() {
     toast('Article deleted.');
   }));
 
-  // leads — same escape treatment
+  // leads
   const leads = JSON.parse(localStorage.getItem('am_leads') || '[]');
   $('#leadCount').textContent = leads.length;
   $('#adminLeadsList').innerHTML = leads.length ? leads.slice().reverse().map(l => {
-    const phone = String(l.phone || '');
-    const safePhone = phone.replace(/\D/g, '');
-    const wa = safePhone ? `https://wa.me/${safePhone}` : '';
+    const phone = l.phone || '';
+    const wa = phone ? `https://wa.me/${phone.replace(/\D/g, '')}` : '#';
     return `
       <div class="lead-row">
-        <div class="lead-meta">${esc(l.type || 'lead')} · ${esc(new Date(l.at).toLocaleString())}</div>
-        <b>${esc(l.name || phone || '(unknown)')}</b>
-        <pre>${esc([
-          l.phone && `Phone: ${l.phone}`,
-          l.email && `Email: ${l.email}`,
-          l.projectType && `Type: ${l.projectType}`,
-          l.role && `Role: ${l.role}`,
-          l.message && `Message: ${l.message}`,
-          l.resume && `Resume: ${l.resume}`
-        ].filter(Boolean).join('\n'))}</pre>
-        ${wa ? `<a class="lead-wa" href="${esc(wa)}" target="_blank" rel="noopener noreferrer">Open in WhatsApp →</a>` : ''}
+        <div class="lead-meta">${l.type || 'lead'} · ${new Date(l.at).toLocaleString()}</div>
+        <b>${l.name || phone || '(unknown)'}</b>
+        <pre>${[
+        l.phone && `Phone: ${l.phone}`,
+        l.email && `Email: ${l.email}`,
+        l.projectType && `Type: ${l.projectType}`,
+        l.role && `Role: ${l.role}`,
+        l.message && `Message: ${l.message}`,
+        l.resume && `Resume: ${l.resume}`
+      ].filter(Boolean).join('\n')}</pre>
+        ${phone ? `<a class="lead-wa" href="${wa}" target="_blank" rel="noopener">Open in WhatsApp →</a>` : ''}
       </div>
     `;
   }).join('') : '<p style="color:var(--muted)">No leads captured yet.</p>';
@@ -1381,7 +1267,7 @@ function openProjectEditor(id) {
   $('#editorBody').innerHTML = `
     <div class="editor">
       <h2>${id ? 'Edit project' : 'New project'}</h2>
-      <label><span>Title</span><input id="ed_title" value="${esc(p.title)}"></label>
+      <label><span>Title</span><input id="ed_title" value="${p.title}"></label>
       <label><span>Category</span>
         <select id="ed_cat">
           <option value="residential" ${p.cat === 'residential' ? 'selected' : ''}>Residential</option>
@@ -1389,15 +1275,15 @@ function openProjectEditor(id) {
           <option value="community" ${p.cat === 'community' ? 'selected' : ''}>Community</option>
         </select>
       </label>
-      <label><span>Location</span><input id="ed_loc" value="${esc(p.location)}"></label>
-      <label><span>Year</span><input id="ed_year" value="${esc(p.year)}"></label>
-      <label><span>Image URL</span><input id="ed_img" value="${esc(p.img)}" placeholder="https://..."></label>
-      <label><span>Tags (comma-separated)</span><input id="ed_tags" value="${esc((p.tags || []).join(', '))}"></label>
-      <label><span>Short description (1 line)</span><textarea id="ed_desc" rows="2">${esc(p.desc || '')}</textarea></label>
-      <label><span>Full description (paragraphs separated by blank line)</span><textarea id="ed_body" rows="6">${esc((p.body || []).join('\n\n'))}</textarea></label>
-      <label><span>Area</span><input id="ed_area" value="${esc(p.facts?.area || '')}"></label>
-      <label><span>Completion</span><input id="ed_comp" value="${esc(p.facts?.completion || '')}"></label>
-      <label><span>Team</span><input id="ed_team" value="${esc(p.facts?.team || '')}"></label>
+      <label><span>Location</span><input id="ed_loc" value="${p.location}"></label>
+      <label><span>Year</span><input id="ed_year" value="${p.year}"></label>
+      <label><span>Image URL</span><input id="ed_img" value="${p.img}" placeholder="https://..."></label>
+      <label><span>Tags (comma-separated)</span><input id="ed_tags" value="${(p.tags || []).join(', ')}"></label>
+      <label><span>Short description (1 line)</span><textarea id="ed_desc" rows="2">${p.desc || ''}</textarea></label>
+      <label><span>Full description (paragraphs separated by blank line)</span><textarea id="ed_body" rows="6">${(p.body || []).join('\n\n')}</textarea></label>
+      <label><span>Area</span><input id="ed_area" value="${p.facts?.area || ''}"></label>
+      <label><span>Completion</span><input id="ed_comp" value="${p.facts?.completion || ''}"></label>
+      <label><span>Team</span><input id="ed_team" value="${p.facts?.team || ''}"></label>
       <label><span>Tile size</span>
         <select id="ed_size">
           <option value="project--sm" ${p.size === 'project--sm' ? 'selected' : ''}>Small</option>
@@ -1460,7 +1346,7 @@ function openArticleEditor(id) {
   $('#editorBody').innerHTML = `
     <div class="editor">
       <h2>${id ? 'Edit article' : 'New article'}</h2>
-      <label><span>Title</span><input id="ed_title" value="${esc(a.title)}"></label>
+      <label><span>Title</span><input id="ed_title" value="${a.title}"></label>
       <label><span>Category</span>
         <select id="ed_cat">
           <option value="sustainable" ${a.category === 'sustainable' ? 'selected' : ''}>Sustainable Architecture</option>
@@ -1468,11 +1354,11 @@ function openArticleEditor(id) {
           <option value="techniques" ${a.category === 'techniques' ? 'selected' : ''}>Building Techniques</option>
         </select>
       </label>
-      <label><span>Image URL</span><input id="ed_img" value="${esc(a.image)}" placeholder="https://..."></label>
-      <label><span>Date (e.g. March 2026)</span><input id="ed_date" value="${esc(a.date)}"></label>
-      <label><span>Read time</span><input id="ed_read" value="${esc(a.readTime)}"></label>
-      <label><span>Excerpt (1-2 sentences)</span><textarea id="ed_excerpt" rows="3">${esc(a.excerpt)}</textarea></label>
-      <label><span>Body (paragraphs separated by blank line)</span><textarea id="ed_body" rows="10">${esc(a.body)}</textarea></label>
+      <label><span>Image URL</span><input id="ed_img" value="${a.image}" placeholder="https://..."></label>
+      <label><span>Date (e.g. March 2026)</span><input id="ed_date" value="${a.date}"></label>
+      <label><span>Read time</span><input id="ed_read" value="${a.readTime}"></label>
+      <label><span>Excerpt (1-2 sentences)</span><textarea id="ed_excerpt" rows="3">${a.excerpt}</textarea></label>
+      <label><span>Body (paragraphs separated by blank line)</span><textarea id="ed_body" rows="10">${a.body}</textarea></label>
       <div class="editor__actions">
         <button class="btn btn--primary" id="ed_save"><span>${id ? 'Save changes' : 'Publish article'}</span></button>
         <button class="btn btn--ghost" data-close>Cancel</button>
